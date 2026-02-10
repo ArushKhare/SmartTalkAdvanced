@@ -123,22 +123,22 @@ def atomic_pop_problems() -> List[Dict]:
                 missing.append(diff)
         save_problem_pool(pool)
 
-    # Generate missing problems on demand
-    for diff in missing:
-        print(f"On-demand generation for {diff}...")
-        problem = generate_one_problem(diff)
-        if problem:
-            problems.append({
-                "difficulty": diff,
-                "problem": problem["problem"],
-                "func_signature": problem.get("func_signature", "def solve() -> None:"),
-                "class_definitions": problem.get("class_definitions", "")
-            })
-        else:
+    # Generate missing problems on demand (single API call for all)
+    if missing:
+        print(f"On-demand batch generation for: {missing}")
+        batch = generate_batch_problems(missing)
+        if len(batch) < len(missing):
             raise HTTPException(
                 status_code=503,
-                detail=f"Failed to generate {diff} problem. Please try again."
+                detail=f"Failed to generate problems. Got {len(batch)}/{len(missing)}. Please try again."
             )
+        for item in batch:
+            problems.append({
+                "difficulty": item["difficulty"],
+                "problem": item["problem"],
+                "func_signature": item.get("func_signature", "def solve() -> None:"),
+                "class_definitions": item.get("class_definitions", "")
+            })
 
     # Sort by difficulty order
     diff_order = {d: i for i, d in enumerate(difficulties)}
@@ -283,7 +283,7 @@ def extract_json_from_response(text: str) -> Optional[Dict]:
     return None
 
 def generate_one_problem(difficulty: str) -> Optional[Dict]:
-    """Generate a problem using DeepSeek R1 via OpenRouter."""
+    """Generate a single problem via OpenRouter (used by background pool filler)."""
 
     prompt = f"""Generate a {difficulty} coding interview problem.
 
@@ -323,7 +323,6 @@ Return ONLY valid JSON with these fields:
                 model=MODEL,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
             )
             elapsed = time.time() - start_time
 
@@ -353,11 +352,103 @@ Return ONLY valid JSON with these fields:
         except Exception as e:
             print(f"Attempt {attempt+1}: Error generating {difficulty}: {e}")
             if attempt < MAX_GENERATION_RETRIES - 1:
-                time.sleep(1 * (attempt + 1))  # backoff
+                time.sleep(1 * (attempt + 1))
             continue
 
     print(f"All {MAX_GENERATION_RETRIES} attempts failed for {difficulty}")
     return None
+
+def generate_batch_problems(difficulties: List[str]) -> List[Dict]:
+    """Generate multiple problems in a single API call."""
+
+    diff_list = ", ".join(difficulties)
+    prompt = f"""Generate {len(difficulties)} coding interview problems, one for EACH of these difficulties: {diff_list}.
+
+For EACH problem include:
+1. Problem description (clear and concise)
+2. Input format
+3. Output format
+4. 2-3 examples with input/output and explanation
+5. Constraints
+6. Python function signature with type hints
+
+IMPORTANT FORMATTING RULES for each "problem" field:
+- Use standard markdown formatting
+- Use code blocks with backticks for code: `code here`
+- Use **bold** for emphasis
+- ALL math expressions and constraints MUST be wrapped in dollar signs for LaTeX rendering
+- Use $\\leq$ for less-than-or-equal, $\\geq$ for greater-than-or-equal, $\\times$ for multiplication
+- Example constraints: $0 \\leq n \\leq 10^5$, $1 \\leq \\text{{s.length}} \\leq 10^4$
+- Example complexity: $O(n \\log n)$
+- NEVER write raw LaTeX without dollar signs - always wrap in $...$
+- Add new lines after each section
+
+Rules for func_signature:
+- Must be a valid Python function signature like: def function_name(params: Type) -> ReturnType:
+- No imports needed (typing symbols like List, Dict, Optional exist)
+- Function name should be descriptive (not "calculate" or "solve")
+- Each problem MUST have a DIFFERENT function name
+
+Keep each description under 300 words. Make examples clear and varied.
+Each problem must be unique and appropriate for its difficulty level.
+
+Return ONLY valid JSON with this EXACT structure:
+{{"problems": [
+  {{"difficulty": "Easy", "problem": "...", "func_signature": "def ...", "class_definitions": ""}},
+  {{"difficulty": "Medium", "problem": "...", "func_signature": "def ...", "class_definitions": ""}},
+  ...
+]}}"""
+
+    for attempt in range(MAX_GENERATION_RETRIES):
+        try:
+            start_time = time.time()
+            response = client.chat.completions.create(
+                model=MODEL,
+                max_tokens=16384,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            elapsed = time.time() - start_time
+
+            raw_text = response.choices[0].message.content or ""
+            data = extract_json_from_response(raw_text)
+
+            if not data or "problems" not in data:
+                print(f"Batch attempt {attempt+1}: Could not parse JSON or missing 'problems' key")
+                print(f"  Raw response (first 500 chars): {raw_text[:500]}")
+                continue
+
+            results = []
+            for item in data["problems"]:
+                diff = item.get("difficulty", "")
+                if diff not in difficulties:
+                    continue
+                if not item.get("problem") or not item.get("func_signature"):
+                    continue
+
+                item["func_signature"] = enforce_good_signature(
+                    item.get("func_signature", ""),
+                    fallback="def solve(nums: List[int]) -> int:"
+                )
+                item["class_definitions"] = item.get("class_definitions", "")
+                item["generation_time"] = elapsed / len(difficulties)
+                results.append(item)
+
+            if len(results) >= len(difficulties):
+                print(f"Batch generated {len(results)} problems in {elapsed:.1f}s")
+                return results
+
+            print(f"Batch attempt {attempt+1}: Only got {len(results)}/{len(difficulties)} valid problems")
+            continue
+
+        except Exception as e:
+            print(f"Batch attempt {attempt+1}: Error: {e}")
+            if attempt < MAX_GENERATION_RETRIES - 1:
+                time.sleep(1 * (attempt + 1))
+            continue
+
+    print(f"All {MAX_GENERATION_RETRIES} batch attempts failed")
+    return []
 
 def fill_pool_parallel():
     with file_lock:
