@@ -19,7 +19,6 @@ services:
   - type: web
     name: smarttalk-frontend
     runtime: static
-    plan: free
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: build
