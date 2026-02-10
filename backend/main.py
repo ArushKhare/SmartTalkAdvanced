@@ -194,12 +194,14 @@ def strip_think_tags(text: str) -> str:
 
 def extract_json_from_response(text: str) -> Optional[Dict]:
     """Extract JSON object from LLM response text."""
-    text = strip_think_tags(text)
+    text = strip_think_tags(text).strip()
+    if not text:
+        return None
 
-    # Strip markdown code fences
-    if text.startswith("```"):
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
+    # Strip markdown code fences (handle ```json ... ``` wrapping)
+    text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+    text = re.sub(r'\n?\s*```\s*$', '', text)
+    text = text.strip()
 
     # Try direct parse first
     try:
@@ -207,21 +209,54 @@ def extract_json_from_response(text: str) -> Optional[Dict]:
     except json.JSONDecodeError:
         pass
 
-    # Try to find JSON object in the text
-    json_match = re.search(r'\{[\s\S]*"problem"[\s\S]*"func_signature"[\s\S]*\}', text)
-    if json_match:
-        candidate = json_match.group(0)
-        # Escape unescaped LaTeX backslashes for JSON parsing
-        latex_commands = ['le', 'ge', 'text', 'sum', 'prod', 'int', 'frac', 'sqrt',
-                         'times', 'div', 'pm', 'mp', 'leq', 'geq', 'ne', 'approx',
-                         'equiv', 'cdot', 'alpha', 'beta', 'gamma', 'delta', 'theta',
-                         'lambda', 'mu', 'sigma', 'pi', 'omega', 'log', 'ln']
-        for cmd in latex_commands:
-            candidate = candidate.replace(f'\\{cmd}', f'\\\\{cmd}')
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
+    # Find the outermost { ... } by brace counting
+    start = text.find('{')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = -1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\':
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end == -1:
+        return None
+
+    candidate = text[start:end + 1]
+
+    # Try parsing as-is
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix unescaped backslashes (common with LaTeX in JSON strings)
+    # Replace single \ not followed by valid JSON escape chars with \\
+    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', candidate)
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
 
     return None
 
@@ -266,6 +301,7 @@ Return ONLY valid JSON with these fields:
                 model=MODEL,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
             )
             elapsed = time.time() - start_time
 
