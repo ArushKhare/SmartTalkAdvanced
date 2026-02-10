@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
 import json
@@ -12,17 +14,20 @@ import multiprocessing
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 # ---------- CONFIG ----------
 load_dotenv()
-API_KEY = os.environ.get("GOOGLE_API_KEY")
+API_KEY = os.environ.get("OPEN_ROUTER_KEY")
 
 if not API_KEY:
-    raise ValueError("GOOGLE_API_KEY not set!")
+    raise ValueError("OPEN_ROUTER_KEY not set!")
 
-client = genai.Client(api_key=API_KEY)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=API_KEY,
+)
+MODEL = "openrouter/pony-alpha"
 PROBLEM_POOL_FILE = Path("problem_pool.json")
 POOL_SIZE = 20
 TARGET_PER_DIFFICULTY = POOL_SIZE // 4
@@ -183,8 +188,45 @@ def fix_markdown_formatting(text: str) -> str:
 
     return text
 
+def strip_think_tags(text: str) -> str:
+    """Strip <think>...</think> reasoning tags from DeepSeek R1 responses."""
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+def extract_json_from_response(text: str) -> Optional[Dict]:
+    """Extract JSON object from LLM response text."""
+    text = strip_think_tags(text)
+
+    # Strip markdown code fences
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON object in the text
+    json_match = re.search(r'\{[\s\S]*"problem"[\s\S]*"func_signature"[\s\S]*\}', text)
+    if json_match:
+        candidate = json_match.group(0)
+        # Escape unescaped LaTeX backslashes for JSON parsing
+        latex_commands = ['le', 'ge', 'text', 'sum', 'prod', 'int', 'frac', 'sqrt',
+                         'times', 'div', 'pm', 'mp', 'leq', 'geq', 'ne', 'approx',
+                         'equiv', 'cdot', 'alpha', 'beta', 'gamma', 'delta', 'theta',
+                         'lambda', 'mu', 'sigma', 'pi', 'omega', 'log', 'ln']
+        for cmd in latex_commands:
+            candidate = candidate.replace(f'\\{cmd}', f'\\\\{cmd}')
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
 def generate_one_problem(difficulty: str) -> Optional[Dict]:
-    """Generate a problem using Gemini's JSON mode with retries."""
+    """Generate a problem using DeepSeek R1 via OpenRouter."""
 
     prompt = f"""Generate a {difficulty} coding interview problem.
 
@@ -214,33 +256,26 @@ Rules for func_signature:
 
 Keep description under 300 words. Make examples clear and varied.
 
-Return a JSON object with these exact keys:
-- "problem": full problem description with examples (string)
-- "func_signature": Python function signature (string)
-- "class_definitions": any helper class definitions needed, or empty string (string)"""
+Return ONLY valid JSON with these fields:
+{{"problem": "full problem description with examples in markdown", "func_signature": "def function_name(params: Type) -> ReturnType:", "class_definitions": ""}}"""
 
     for attempt in range(MAX_GENERATION_RETRIES):
         try:
             start_time = time.time()
-            response = client.models.generate_content(
-                model="gemini-3-pro-preview",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema={
-                        "type": "OBJECT",
-                        "properties": {
-                            "problem": {"type": "STRING"},
-                            "func_signature": {"type": "STRING"},
-                            "class_definitions": {"type": "STRING"},
-                        },
-                        "required": ["problem", "func_signature"],
-                    },
-                ),
+            response = client.chat.completions.create(
+                model=MODEL,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
             )
             elapsed = time.time() - start_time
 
-            data = json.loads(response.text)
+            raw_text = response.choices[0].message.content or ""
+            data = extract_json_from_response(raw_text)
+
+            if not data:
+                print(f"Attempt {attempt+1}: Could not parse JSON for {difficulty}")
+                print(f"  Raw response (first 300 chars): {raw_text[:300]}")
+                continue
 
             # Validate required fields
             if not data.get("problem") or not data.get("func_signature"):
@@ -257,9 +292,6 @@ Return a JSON object with these exact keys:
 
             return data
 
-        except json.JSONDecodeError as e:
-            print(f"Attempt {attempt+1}: JSON parse error for {difficulty}: {e}")
-            continue
         except Exception as e:
             print(f"Attempt {attempt+1}: Error generating {difficulty}: {e}")
             if attempt < MAX_GENERATION_RETRIES - 1:
@@ -425,8 +457,8 @@ def run_code_sandboxed(code: str, func_name: str, test_input: str, expected: str
 
 
 # ---------- API Endpoints ----------
-@app.get("/")
-def root():
+@app.get("/api/health")
+def health():
     return {"message": "SmartTalk API", "status": "running"}
 
 @app.get("/pool/status")
@@ -495,12 +527,14 @@ SCORE: [number]
 FEEDBACK: [your feedback with markdown formatting]"""
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3-pro-preview",
-            contents=ai_prompt
+        response = client.chat.completions.create(
+            model=MODEL,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": ai_prompt}],
         )
 
-        response_text = fix_markdown_formatting(response.text)
+        response_text = strip_think_tags(response.choices[0].message.content or "")
+        response_text = fix_markdown_formatting(response_text)
 
         score_match = re.search(r'SCORE:\s*(\d+)', response_text)
         score = int(score_match.group(1)) if score_match else 5
@@ -562,12 +596,14 @@ Format your response EXACTLY as:
 - Space: O(1)"""
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3-pro-preview",
-            contents=ai_prompt
+        response = client.chat.completions.create(
+            model=MODEL,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": ai_prompt}],
         )
 
-        response_text = fix_markdown_formatting(response.text)
+        response_text = strip_think_tags(response.choices[0].message.content or "")
+        response_text = fix_markdown_formatting(response_text)
 
         return {
             "score": 0,
@@ -641,6 +677,19 @@ def clear_pool():
         if PROBLEM_POOL_FILE.exists():
             PROBLEM_POOL_FILE.unlink()
     return {"message": "Pool cleared"}
+
+# ---------- Serve Frontend ----------
+FRONTEND_BUILD_DIR = Path(os.environ.get("FRONTEND_BUILD_DIR", "../frontend/build"))
+
+if FRONTEND_BUILD_DIR.exists():
+    app.mount("/static", StaticFiles(directory=FRONTEND_BUILD_DIR / "static"), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        file_path = FRONTEND_BUILD_DIR / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(FRONTEND_BUILD_DIR / "index.html")
 
 # Start generator on startup
 @app.on_event("startup")
