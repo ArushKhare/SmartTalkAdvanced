@@ -102,26 +102,48 @@ def atomic_add_problem(diff: str, problem: Dict) -> bool:
         return True
 
 def atomic_pop_problems() -> List[Dict]:
-    """Atomically pop one problem per difficulty for a quiz."""
+    """Atomically pop one problem per difficulty for a quiz.
+    Falls back to on-demand generation for missing difficulties."""
     difficulties = ["Easy", "Medium", "Hard", "Expert"]
+    problems = []
+
     with file_lock:
         pool = load_problem_pool()
-        problems = []
+        missing = []
         for diff in difficulties:
-            if not pool.get(diff):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"No {diff} problems available. Pool status: "
-                           + ", ".join(f"{d}: {len(pool.get(d, []))}" for d in difficulties)
-                )
-            problem = pool[diff].pop(0)
+            if pool.get(diff):
+                problem = pool[diff].pop(0)
+                problems.append({
+                    "difficulty": diff,
+                    "problem": problem["problem"],
+                    "func_signature": problem.get("func_signature", "def solve() -> None:"),
+                    "class_definitions": problem.get("class_definitions", "")
+                })
+            else:
+                missing.append(diff)
+        save_problem_pool(pool)
+
+    # Generate missing problems on demand
+    for diff in missing:
+        print(f"On-demand generation for {diff}...")
+        problem = generate_one_problem(diff)
+        if problem:
             problems.append({
                 "difficulty": diff,
                 "problem": problem["problem"],
                 "func_signature": problem.get("func_signature", "def solve() -> None:"),
                 "class_definitions": problem.get("class_definitions", "")
             })
-        save_problem_pool(pool)
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to generate {diff} problem. Please try again."
+            )
+
+    # Sort by difficulty order
+    diff_order = {d: i for i, d in enumerate(difficulties)}
+    problems.sort(key=lambda p: diff_order.get(p["difficulty"], 99))
+
     return problems
 
 # ---------- Problem Generation ----------
