@@ -4,7 +4,7 @@ A fast, modern coding interview application built with **React** and **FastAPI**
 
 ## Features
 
-- **Fast** - React frontend with FastAPI backend (much faster than Streamlit)
+- **Fast** - React frontend with FastAPI backend
 - **4 Difficulty Levels** - Easy, Medium, Hard, Expert
 - **Test Cases** - Add and run your own test cases
 - **AI Scoring** - Gemini AI analyzes and scores your solutions
