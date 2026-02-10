@@ -291,7 +291,7 @@ def fill_pool_parallel():
     for i, diff in enumerate(tasks):
         try:
             if i > 0:
-                time.sleep(2)  # 2s delay between API calls to avoid rate limiting
+                time.sleep(5)  # 2s delay between API calls to avoid rate limiting
             problem = generate_one_problem(diff)
 
             if problem:
