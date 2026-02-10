@@ -29,6 +29,7 @@ smarttalk/
 ├── run.py                   # Cross-platform runner
 ├── run.sh                   # Linux/Mac runner
 ├── run.bat                  # Windows runner
+├── .gitignore
 └── README.md
 ```
 
@@ -42,7 +43,7 @@ Create `backend/.env`:
 GOOGLE_API_KEY=your-api-key-here
 ```
 
-Get your key from: https://makersuite.google.com/app/apikey
+Get your key from: https://aistudio.google.com/app/apikey
 
 ### 2. Run the App
 
@@ -96,15 +97,6 @@ npm start
 | `/generator/start` | POST | Start background generator |
 | `/generator/stop` | POST | Stop background generator |
 | `/pool/clear` | POST | Clear the problem pool |
-
-## Speed Comparison
-
-| Framework | Page Load | Response Time |
-|-----------|-----------|---------------|
-| Streamlit | ~5s | ~2-3s |
-| React + FastAPI | <1s | <0.5s |
-
-**~5x faster than Streamlit!**
 
 ## Tech Stack
 
