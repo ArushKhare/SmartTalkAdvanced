@@ -15,9 +15,9 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.6
 
-staticSites:
   # React Frontend
-  - name: smarttalk-frontend
+  - type: static
+    name: smarttalk-frontend
     plan: free
     rootDir: frontend
     buildCommand: npm install && npm run build
